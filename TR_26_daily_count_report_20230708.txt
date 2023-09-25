@@ -1,0 +1,4 @@
+Total 4G provision Success: 281745
+Total 4G provision Failed: 0
+Total 4G Package Success: 
+Total 4G Package Failed: 157
