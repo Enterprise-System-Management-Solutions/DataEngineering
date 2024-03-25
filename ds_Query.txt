@@ -1,0 +1,459 @@
+import ssl
+import pandas as pd
+import os
+#python 3
+import subprocess
+
+
+from datetime import datetime, timedelta
+import sys
+today = sys.argv[1]
+
+
+# Impala Connection
+import ssl
+from impala.dbapi import connect
+#import datetime
+sys.path.append('/home/bi_impala_user/Common/')
+import impala_connection as bl_impala
+
+
+impala_host=bl_impala.host
+impala_port=bl_impala.port
+impala_ssl=bl_impala.ssl
+impala_user=bl_impala.user
+impala_krb_service_name=bl_impala.krb_service_name
+impala_auth=bl_impala.auth
+impala_pass=bl_impala.password
+
+
+def impala_init():
+    conn = connect(host=impala_host, port=impala_port, use_ssl=impala_ssl, user=impala_user,\
+                   kerberos_service_name=impala_krb_service_name, auth_mechanism=impala_auth, password=impala_pass)
+    return conn
+  
+conn=impala_init()
+cur = conn.cursor()
+
+
+#table_list = ['ti_daily_active_subs','ti_daily_active_subs_w1',
+#'ti_daily_active_subs_w2','ti_daily_active_subs_w3',
+#'ti_daily_active_subs_w4','ti_daily_active_subs_w_plus2',
+#'ti_daily_active_subs_recharge','ti_daily_active_subs_bundle',
+#'ti_daily_active_subs_bundle_v1'] 
+
+
+# Table 1
+# query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs AS (
+# SELECT
+# 	a.subscription_key,
+# 	CASE WHEN d.date_value >= To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -30 DAY)) THEN 1 ELSE 0 end AS ga_flag,
+# 	d.date_value,
+# 	datediff(To_Date('{today}'),To_Date('2005-01-01'))+1- first_rga_date_key AS aon_days,
+# 	CASE WHEN b.subscription_key IS NOT NULL THEN 1 ELSE 0 end AS last_30d_react_flag,
+# 	CASE WHEN c.subscription_key IS NULL THEN 0 ELSE 1 end AS next_15d_churn_flag,
+# 	churn_date
+# FROM 
+# 	td_backup.subscription_snapshot_fct a
+# INNER JOIN	
+# 	(SELECT * FROM td_backup.date_dim WHERE processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))) d
+# ON a.first_rga_date_key = d.date_key
+# LEFT JOIN 
+# (
+# 	SELECT DISTINCT subscription_key FROM bi_view.reactivation_subs
+# 	WHERE 
+# 		date_key BETWEEN
+# 		    datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-30 AND 
+# 			datediff(To_Date('{today}'),To_Date('2005-01-01'))+1
+# ) b ON a.subscription_key = b.subscription_key
+# LEFT JOIN
+# (
+# 	SELECT subscription_key, max(churn_date) churn_date FROM bi_view.daily_churn 
+# 	WHERE 
+# 		churn_date BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1 DAY))
+# 		AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +45 DAY))
+#     group by 1
+# ) c ON a.subscription_key = c.subscription_key
+# WHERE 
+# 	a.date_key = datediff(To_Date('{today}'),To_Date('2005-01-01'))+1
+# 	AND days_since_last_activity = 0
+# 	AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1 DAY))
+# 		);"""
+
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs AS (
+SELECT
+	a.subscription_key,
+  c.msisdn,
+	CASE WHEN d.date_value >= To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -30 DAY)) THEN 1 ELSE 0 end AS ga_flag,
+	d.date_value,
+	datediff(To_Date('{today}'),To_Date('2005-01-01'))+1- first_rga_date_key AS aon_days,
+	CASE WHEN b.subscription_key IS NOT NULL THEN 1 ELSE 0 end AS last_30d_react_flag
+FROM 
+	td_backup.subscription_snapshot_fct a
+INNER JOIN	
+	(SELECT * FROM td_backup.date_dim WHERE processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))) d
+ON a.first_rga_date_key = d.date_key
+LEFT JOIN 
+(
+	SELECT DISTINCT subscription_key FROM td_backup.reactivation_subs
+	WHERE 
+		date_key BETWEEN
+		    datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-30 AND 
+			datediff(To_Date('{today}'),To_Date('2005-01-01'))+1
+) b ON a.subscription_key = b.subscription_key
+LEFT JOIN
+(
+select 
+subscription_key,
+service_number as msisdn
+from
+td_backup.subscription_dim
+where
+lower(scd_end_date) = 'null'
+AND processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1 DAY))
+and lower(service_type) = 'pre-paid'
+) c on a.subscription_key = c.subscription_key
+WHERE 
+	a.date_key = datediff(To_Date('{today}'),To_Date('2005-01-01'))+1
+	AND days_since_last_activity = 0
+	AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1 DAY))
+		);"""
+   
+cur.execute(query)
+print('Table1 : ti_daily_active_subs created successfully')
+# Table 2
+query=f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_w1 AS (
+SELECT 
+	a.subscription_key,
+	Sum(CASE WHEN usage_type_name = 'MOC' THEN ACTUAL_DURATION/60 end) MOC_duration,
+	Sum(CASE WHEN usage_type_name = 'MTC' THEN ACTUAL_DURATION/60 end) MTC_duration,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MOC') THEN other_party end) b_party_count,
+	Sum(CASE WHEN usage_type_name = 'GPRS' THEN DATA_SIZE/1024/1024 end) GPRS,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('GPRS' ,'MOC','MTC') THEN a.DATE_KEY end) AS DOU,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MTC') THEN a.DATE_KEY end) AS voice_DOU,
+	Count(DISTINCT CASE WHEN usage_type_name = 'GPRS' THEN a.DATE_KEY end) AS data_DOU
+FROM 
+	bi_view.ti_daily_active_subs m,
+	td_backup.call_usage_fct a,
+	td_backup.CALL_USAGE_type_dim b
+WHERE 
+	m.subscription_key = a.SUBSCRIPTION_KEY AND
+	a.DATe_key BETWEEN 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-6 AND 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1 AND
+	a.USAGE_TYPE_KEY = b.usage_type_key 
+	--AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1 DAY))
+	AND b.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	and b.usage_type_name IN ('GPRS' ,'MOC','MTC')
+GROUP BY 1);"""
+cur.execute(query)
+print('Table2 : ti_daily_active_subs_w1 created successfully')
+# Table 3
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_w2 AS (
+SELECT 
+	a.subscription_key,
+	Sum(CASE WHEN usage_type_name = 'MOC' THEN ACTUAL_DURATION/60 end) MOC_duration,
+	Sum(CASE WHEN usage_type_name = 'MTC' THEN ACTUAL_DURATION/60 end) MTC_duration,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MOC') THEN other_party end) b_party_count,
+	Sum(CASE WHEN usage_type_name = 'GPRS' THEN DATA_SIZE/1024/1024 end) GPRS,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('GPRS' ,'MOC','MTC') THEN a.DATE_KEY end) AS DOU,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MTC') THEN a.DATE_KEY end) AS voice_DOU,
+	Count(DISTINCT CASE WHEN usage_type_name = 'GPRS' THEN a.DATE_KEY end) AS data_DOU
+FROM 
+	bi_view.ti_daily_active_subs m,
+	td_backup.call_usage_fct a,
+	td_backup.CALL_USAGE_type_dim b
+WHERE 
+	m.subscription_key = a.SUBSCRIPTION_KEY AND
+	a.DATe_key BETWEEN 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-13 AND 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-7 AND
+	a.USAGE_TYPE_KEY = b.usage_type_key 
+	--AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1-6 DAY))
+	AND b.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	and b.usage_type_name IN ('GPRS' ,'MOC','MTC')
+GROUP BY 1);"""
+cur.execute(query)
+print('Table3 : ti_daily_active_subs_w2 created successfully')
+# Table 4
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_w3 AS
+(
+SELECT 
+	a.subscription_key,
+	Sum(CASE WHEN usage_type_name = 'MOC' THEN ACTUAL_DURATION/60 end) MOC_duration,
+	Sum(CASE WHEN usage_type_name = 'MTC' THEN ACTUAL_DURATION/60 end) MTC_duration,
+	Sum(CASE WHEN usage_type_name = 'GPRS' THEN DATA_SIZE/1024/1024 end) GPRS,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MOC') THEN other_party end) b_party_count,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('GPRS' ,'MOC','MTC') THEN a.DATE_KEY end) AS DOU,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MTC') THEN a.DATE_KEY end) AS voice_DOU,
+	Count(DISTINCT CASE WHEN usage_type_name = 'GPRS' THEN a.DATE_KEY end) AS data_DOU
+FROM 
+	bi_view.ti_daily_active_subs m,
+	td_backup.CALL_USAGE_FCT a,
+	td_backup.CALL_USAGE_type_dim b
+WHERE 
+	m.subscription_key = a.SUBSCRIPTION_KEY AND
+	a.DATe_key BETWEEN  
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-20 AND
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-14 AND
+	a.USAGE_TYPE_KEY = b.usage_type_key  AND
+	usage_type_name IN ('GPRS' ,'MOC','MTC')
+	--AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1-14 DAY))
+	AND b.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	and b.usage_type_name IN ('GPRS' ,'MOC','MTC')
+GROUP BY 1);"""
+cur.execute(query)
+print('Table4 : ti_daily_active_subs_w3 created successfully')
+# Table 5
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_w4 AS (
+SELECT 
+	a.subscription_key,
+	Sum(CASE WHEN usage_type_name = 'MOC' THEN ACTUAL_DURATION/60 end) MOC_duration,
+	Sum(CASE WHEN usage_type_name = 'MTC' THEN ACTUAL_DURATION/60 end) MTC_duration,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MOC') THEN other_party end) b_party_count,
+	Sum(CASE WHEN usage_type_name = 'GPRS' THEN DATA_SIZE/1024/1024 end) GPRS,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('GPRS' ,'MOC','MTC') THEN a.DATE_KEY end) AS DOU,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MTC') THEN a.DATE_KEY end) AS voice_DOU,
+	Count(DISTINCT CASE WHEN usage_type_name = 'GPRS' THEN a.DATE_KEY end) AS data_DOU
+FROM 
+	bi_view.ti_daily_active_subs m,
+	td_backup.call_usage_fct a,
+	td_backup.CALL_USAGE_type_dim b
+WHERE 
+	m.subscription_key = a.SUBSCRIPTION_KEY AND
+	a.DATe_key BETWEEN 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-27 AND 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1-21 AND
+	a.USAGE_TYPE_KEY = b.usage_type_key 
+	--AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1-21 DAY))
+	AND b.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	and b.usage_type_name IN ('GPRS' ,'MOC','MTC')
+GROUP BY 1);"""
+cur.execute(query)
+print('Table5 : ti_daily_active_subs_w4 created successfully')
+# Table 6
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_w_plus2 AS (
+SELECT 
+	a.subscription_key,
+	Sum(CASE WHEN usage_type_name = 'MOC' THEN ACTUAL_DURATION/60 end) MOC_duration,
+	Sum(CASE WHEN usage_type_name = 'MTC' THEN ACTUAL_DURATION/60 end) MTC_duration,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MOC') THEN other_party end) b_party_count,
+	Sum(CASE WHEN usage_type_name = 'GPRS' THEN DATA_SIZE/1024/1024 end) GPRS,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('GPRS' ,'MOC','MTC') THEN a.DATE_KEY end) AS DOU,
+	Count(DISTINCT CASE WHEN usage_type_name IN ('MOC','MTC') THEN a.DATE_KEY end) AS voice_DOU,
+	Count(DISTINCT CASE WHEN usage_type_name = 'GPRS' THEN a.DATE_KEY end) AS data_DOU
+FROM 
+	bi_view.ti_daily_active_subs m,
+	td_backup.call_usage_fct a,
+	td_backup.CALL_USAGE_type_dim b
+WHERE 
+	m.subscription_key = a.SUBSCRIPTION_KEY AND
+	a.DATe_key BETWEEN 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1+16 AND 
+		datediff(To_Date('{today}'),To_Date('2005-01-01'))+1+30 AND
+	a.USAGE_TYPE_KEY = b.usage_type_key 
+	--AND a.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1+30 DAY))
+	AND b.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	and b.usage_type_name IN ('GPRS' ,'MOC','MTC')
+GROUP BY 1);"""
+cur.execute(query)
+print('Table6 : ti_daily_active_subs_w_plus2 created successfully')
+# Table 7
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_recharge AS (
+SELECT 
+	a.subscription_key,
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -6 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL 0 DAY)) THEN main_account_amount end) recharge_w1,
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -13 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -7 DAY)) THEN main_account_amount end) recharge_w2,
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -20 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -14 DAY)) THEN main_account_amount end) recharge_w3,
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -27 DAY))	 AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -21 DAY)) THEN main_account_amount end) recharge_w4, 
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -30 DAY))	 AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +0 DAY)) THEN main_account_amount end) recharge_m1, 
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -60 DAY))	 AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -30 DAY)) THEN main_account_amount end) recharge_m2,  
+	Sum(CASE WHEN DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -90 DAY))	 AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -61 DAY)) THEN main_account_amount end) recharge_m3 
+FROM
+	bi_view.ti_daily_active_subs a,
+    td_backup.RECHARGE_FCT RF,
+    td_backup.RECHARGE_PURPOSE_DIM RPD,
+    td_backup.RECHARGE_TYPE_DIM RTD,
+    td_backup.DATE_DIM DD
+WHERE
+	a.subscription_key = rf.subscription_key
+    AND RF.RECHARGE_PURPOSE_KEY = RPD.RECHARGE_PURPOSE_KEY 
+	AND Lower(recharge_validity) = 'valid recharge' 
+	AND RF.RECHARGE_TYPE_KEY= RTD.RECHARGE_TYPE_KEY
+	AND RF.DATE_KEY = DD.DATE_KEY 
+	AND DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -90 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +0 DAY))
+	--AND RF.processing_date = To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL +1 Days))
+	AND RPD.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	AND RTD.processing_date = To_Date(date_add(Now(), INTERVAL -1 DAY))
+	AND DD.processing_date =  To_Date(date_add(Now(), INTERVAL -1 DAY))
+GROUP BY 1
+);"""
+cur.execute(query)
+print('Table7 : ti_daily_active_subs_recharge created successfully')
+# Table 8
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_bundle AS (
+SELECT 
+	subscription_key,
+	DD.date_value,
+	--time_key_new,
+	--Cast(Trim(date_value)||Trim(t.TIME_TEXT_24) AS TIMESTAMP(0) FORMAT 'YYYY-MM-DDHH:MI:SS') bundle_time,
+	main_account_amount AS bundle_amount,
+	PURPOSE_TYPE,
+	CASE WHEN (CASE 
+	    WHEN PERIODIC_UNIT = 'hours' THEN PERIODIC_AMOUNT/24
+	    WHEN PERIODIC_UNIT = 'months' THEN PERIODIC_AMOUNT*30
+	    ELSE PERIODIC_AMOUNT END)<=4 THEN 'A. 3D'
+	WHEN (CASE 
+	    WHEN PERIODIC_UNIT = 'hours' THEN PERIODIC_AMOUNT/24
+	    WHEN PERIODIC_UNIT = 'months' THEN PERIODIC_AMOUNT*30
+	    ELSE PERIODIC_AMOUNT END)<=7 THEN 'B. 7D'
+	WHEN (CASE 
+	    WHEN PERIODIC_UNIT = 'hours' THEN PERIODIC_AMOUNT/24
+	    WHEN PERIODIC_UNIT = 'months' THEN PERIODIC_AMOUNT*30
+	    ELSE PERIODIC_AMOUNT END)<=15 THEN 'C. 15D'
+	WHEN (CASE 
+	    WHEN PERIODIC_UNIT = 'hours' THEN PERIODIC_AMOUNT/24
+	    WHEN PERIODIC_UNIT = 'months' THEN PERIODIC_AMOUNT*30
+	    ELSE PERIODIC_AMOUNT END)<=30 THEN 'D. 30D'
+	ELSE 'E. Null' END VALIDITY
+FROM 
+	td_backup.recharge_fct b,
+	td_backup.recharge_purpose_dim c
+LEFT JOIN 
+	bi_view.PC_PRODUCTS_PKG PKG 
+	ON c.DESCRIPTION = PKG.CODE AND PKG.SNP_DATE =  To_Date(date_add(Now(), INTERVAL -1 DAY)),
+	td_backup.recharge_type_dim d,
+	td_backup.DATE_DIM DD,
+	td_backup.activity_time_dim t
+WHERE 
+	b.date_key = dd.date_key
+	AND b.time_key_new = t.activity_time_key
+	AND b.RECHARGE_PURPOSE_KEY = c.RECHARGE_PURPOSE_KEY 
+	AND b.RECHARGE_TYPE_KEY = d.RECHARGE_TYPE_KEY 
+	AND DD.DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -30 DAY)) 
+	AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -0 DAY))
+	AND Lower(PURPOSE_TYPE) IN ('voice bundle','gprs','mixed bundle') 
+	AND main_account_amount<0
+	AND DD.processing_date =  To_Date(date_add(Now(), INTERVAL -1 DAY))
+	AND d.processing_date =  To_Date(date_add(Now(), INTERVAL -1 DAY))
+	AND t.processing_date =  To_Date(date_add(Now(), INTERVAL -1 DAY))
+	AND c.processing_date =  To_Date(date_add(Now(), INTERVAL -1 DAY))
+);"""
+cur.execute(query)
+print('Table8 : ti_daily_active_subs_bundle created successfully')
+# Table 9
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_bundle_v1 AS (
+SELECT 
+	subscription_key,
+	Sum(CASE WHEN DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -6 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -0 DAY)) THEN bundle_amount end)*-1 bundle_w1,
+	Sum(CASE WHEN DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -13 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -7 DAY)) THEN bundle_amount end)*-1 bundle_w2,
+	Sum(CASE WHEN DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -20 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -14 DAY)) THEN bundle_amount end)*-1 bundle_w3,
+	Sum(CASE WHEN DATE_VALUE BETWEEN To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -27 DAY)) AND To_Date(date_add(Cast('{today}' AS TIMESTAMP), INTERVAL -21 DAY)) THEN bundle_amount end)*-1 bundle_w4,
+	Max(Abs(bundle_amount)) AS MRD,
+	Max(validity) AS  max_validity,
+	Sum(CASE WHEN purpose_type = 'Voice Bundle' THEN 1 end) voice_bundle,
+	Sum(CASE WHEN purpose_type = 'Mixed Bundle' THEN 1 end) mixed_bundle,
+	Sum(CASE WHEN purpose_type = 'GPRS' THEN 1 end) data_bundle
+FROM 
+	bi_view.ti_daily_active_subs_bundle
+GROUP BY 1
+);"""
+cur.execute(query)
+print('Table9 : ti_daily_active_subs_bundle_v1 created successfully')
+
+# Table 10
+query = f"""CREATE EXTERNAL TABLE IF NOT EXISTS bi_view.ti_daily_active_subs_kpi_v2 AS
+(
+SELECT 
+	a.*,
+	Coalesce(b.MOC_duration,0) AS MOC_duration_w1,
+	Coalesce(b.MTC_duration,0) AS MTC_duration_w1,
+	Coalesce(b.GPRS,0) AS GPRS_w1,
+	Coalesce(b.DOU,0) AS DOU_w1,
+	Coalesce(b.voice_DOU,0) AS voice_DOU_w1,
+	Coalesce(b.data_DOU,0) AS data_DOU_w1,
+	Coalesce(b.b_party_count,0) AS b_party_w1,
+	
+	Coalesce(c.MOC_duration,0) AS MOC_duration_w2,
+	Coalesce(c.MTC_duration,0) AS MTC_duration_w2,
+	Coalesce(c.GPRS,0) AS GPRS_w2,
+	Coalesce(c.DOU,0) AS DOU_w2,
+	Coalesce(c.voice_DOU,0) AS voice_DOU_w2,
+	Coalesce(c.data_DOU,0) AS data_DOU_w2,
+	Coalesce(c.b_party_count,0) AS b_party_w2,
+	
+	Coalesce(d.MOC_duration,0) AS MOC_duration_w3,
+	Coalesce(d.MTC_duration,0) AS MTC_duration_w3,
+	Coalesce(d.GPRS,0) AS GPRS_w3,
+	Coalesce(d.DOU,0) AS DOU_w3,
+	Coalesce(d.voice_DOU,0) AS voice_DOU_w3,
+	Coalesce(d.data_DOU,0) AS data_DOU_w3,
+	Coalesce(d.b_party_count,0) AS b_party_w3,
+	
+	Coalesce(e.MOC_duration,0) AS MOC_duration_w4,
+	Coalesce(e.MTC_duration,0) AS MTC_duration_w4,
+	Coalesce(e.GPRS,0) AS GPRS_w4,
+	Coalesce(e.DOU,0) AS DOU_w4,
+	Coalesce(e.voice_DOU,0) AS voice_DOU_w4,
+	Coalesce(e.data_DOU,0) AS data_DOU_w4,
+	Coalesce(e.b_party_count,0) AS b_party_w4,
+	
+	
+	Coalesce(h.MOC_duration,0) AS MOC_duration_bw2,
+	Coalesce(h.MTC_duration,0) AS MTC_duration_bw2,
+	Coalesce(h.GPRS,0) AS GPRS_bw2,
+	Coalesce(h.DOU,0) AS DOU_bw2,
+	Coalesce(h.voice_DOU,0) AS voice_DOU_bw2,
+	Coalesce(h.data_DOU,0) AS data_DOU_bw2,
+	Coalesce(h.b_party_count,0) AS b_party_bw2,
+	
+	Coalesce(recharge_w1,0) recharge_w1,
+	Coalesce(recharge_w2,0) recharge_w2,
+	Coalesce(recharge_w3,0) recharge_w3,
+	Coalesce(recharge_w4,0)recharge_w4,
+	Coalesce(recharge_m1,0)recharge_m1,
+	Coalesce(recharge_m2,0) recharge_m2,
+	Coalesce(recharge_m3,0) recharge_m3,
+	
+	Coalesce(bundle_w1,0) bundle_w1,
+	Coalesce(bundle_w2,0) bundle_w2,
+	Coalesce(bundle_w3,0) bundle_w3,
+	Coalesce(bundle_w4,0) bundle_w4,
+	CASE WHEN voice_bundle>1 THEN 1 ELSE 0 end AS voice_bundle_flag,
+	CASE WHEN data_bundle>1 THEN 1 ELSE 0 end AS data_bundle_flag,
+	CASE WHEN mixed_bundle>1 THEN 1 ELSE 0 end AS mixed_bundle_flag,
+	CASE 
+		WHEN max_validity = 'A. 3D' THEN 1 
+		WHEN max_validity = 'B. 7D' THEN 2 		
+		WHEN max_validity = 'C. 15D' THEN 3 		
+		WHEN max_validity = 'D. 30D' THEN 4 		
+		ELSE 0 end AS max_validity
+FROM 
+	bi_view.ti_daily_active_subs a
+LEFT JOIN
+	bi_view.ti_daily_active_subs_w1 b
+ON a.subscription_key = b.subscription_key
+LEFT JOIN	
+	bi_view.ti_daily_active_subs_w2 c
+ON a.subscription_key = c.subscription_key
+LEFT JOIN
+	bi_view.ti_daily_active_subs_w3 d
+ON a.subscription_key = d.subscription_key
+LEFT JOIN
+	bi_view.ti_daily_active_subs_w4 e
+ON a.subscription_key = e.subscription_key
+LEFT JOIN
+	bi_view.ti_daily_active_subs_recharge f
+ON a.subscription_key = f.subscription_key
+LEFT JOIN
+	bi_view.ti_daily_active_subs_bundle_v1  g
+ON a.subscription_key = g.subscription_key
+LEFT JOIN 
+	bi_view.ti_daily_active_subs_w_plus2 h
+ON a.subscription_key = h.subscription_key
+);"""
+cur.execute(query)
+print('Table10 : ti_daily_active_subs_kpi_v2 created successfully')
+
+cur.close()
+print('Connection Closed')
